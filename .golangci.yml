@@ -1,0 +1,27 @@
+# golangci-lint 配置。
+# 默认 linters + gofmt/misspell/errorlint/unconvert/bodyclose/revive/gocritic。
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - gofmt
+    - misspell
+    - errorlint
+    - unconvert
+    - bodyclose
+    - revive
+    - gocritic
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+      - name: var-naming
+      - name: blank-imports
+      - name: indent-error-flow
+      - name: receiver-naming
+  gocritic:
+    disabled-checks:
+      - ifElseChain
+      - singleCaseSwitch
