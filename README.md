@@ -40,9 +40,9 @@ new-api 本地日志 ──tail+正则──► 采集器 ──按分钟聚合�
 | `COLLECTOR_SINK_TOKEN` | 推送鉴权 Bearer Token(中心校验);留空=不带 | 留空 |
 | `COLLECTOR_NODE` | 本节点标识(展示用,如 `master`/`slave`) | 主机名 |
 | `COLLECTOR_FLUSH_SECONDS` | 聚合推送间隔(秒,≥5) | `60` |
-| `COLLECTOR_CA_FILE` | 额外信任的 PEM 根证书文件。用于 HTTPS 接收端使用私有 CA 的场景；证书应只读挂载到容器。 | 留空(仅系统根证书) |
+| `COLLECTOR_CA_FILE` | 额外信任的 PEM 根证书文件。用于 HTTPS 接收端使用私有 CA 的场景；证书应只读挂载到容器。 | 留空(仅内置公共根证书) |
 
-使用内部 CA 的 HTTPS 接收端时，挂载其**根证书**（不是私钥），并设置 `COLLECTOR_CA_FILE`。采集器会把它追加到信任链；不会关闭或跳过 TLS 证书校验：
+镜像内置标准公共根证书包，因此 Let’s Encrypt、Cloudflare 等公开 HTTPS 证书无需额外配置。仅当接收端使用私有 CA 时，挂载其**根证书**（不是私钥），并设置 `COLLECTOR_CA_FILE`。采集器会把它追加到信任链；不会关闭或跳过 TLS 证书校验：
 
 ```bash
 -v /opt/nexusapi/deploy/certs/monitor-internal-ca.crt:/etc/collector/monitor-ca.crt:ro \
@@ -103,7 +103,7 @@ docker build -t newapi-reject-collector .                          # 镜像
 - **只读**日志文件,不写、不改、不连任何库。
 - 日志拒绝行只含 模型/分组/用户id 等路由信息,**不含密钥**;采集器也只抽 模型/分组/原因/计数 推出。
 - 与中心监控间用 `COLLECTOR_SINK_TOKEN` 鉴权,建议同时限制接收接口仅内网可达。
-- HTTPS 使用私有 CA 时通过 `COLLECTOR_CA_FILE` 显式信任其根证书；**禁止**以 `InsecureSkipVerify` 等方式绕过证书校验。
+- 镜像内置公共 CA 信任包；HTTPS 使用私有 CA 时通过 `COLLECTOR_CA_FILE` 显式信任其根证书；**禁止**以 `InsecureSkipVerify` 等方式绕过证书校验。
 
 ## License
 
