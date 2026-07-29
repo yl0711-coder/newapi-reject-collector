@@ -1,6 +1,14 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseLine(t *testing.T) {
 	cases := []struct {
@@ -85,5 +93,44 @@ func TestAgg(t *testing.T) {
 	a.merge(s)
 	if got := a.drain(); len(got) != 2 {
 		t.Errorf("merge 后应有 2 桶,得 %d", len(got))
+	}
+}
+
+func TestNewHTTPClientTrustsConfiguredCA(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	var certPEM bytes.Buffer
+	if err := pem.Encode(&certPEM, &pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}); err != nil {
+		t.Fatal(err)
+	}
+	caFile := filepath.Join(t.TempDir(), "monitor-ca.crt")
+	if err := os.WriteFile(caFile, certPEM.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cl, err := newHTTPClient(Config{CAFile: caFile})
+	if err != nil {
+		t.Fatalf("newHTTPClient: %v", err)
+	}
+	resp, err := cl.Get(server.URL)
+	if err != nil {
+		t.Fatalf("configured CA should be trusted: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status=%d want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
+func TestNewHTTPClientRejectsInvalidCA(t *testing.T) {
+	caFile := filepath.Join(t.TempDir(), "bad-ca.crt")
+	if err := os.WriteFile(caFile, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newHTTPClient(Config{CAFile: caFile}); err == nil {
+		t.Fatal("invalid CA should be rejected")
 	}
 }

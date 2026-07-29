@@ -11,6 +11,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -37,8 +39,14 @@ func main() {
 		slog.Error("缺少 COLLECTOR_SINK_URL(中心监控接收地址)")
 		os.Exit(1)
 	}
+	cl, err := newHTTPClient(cfg)
+	if err != nil {
+		slog.Error("初始化 HTTPS 客户端失败", "err", err)
+		os.Exit(1)
+	}
 	slog.Info("采集器启动",
-		"log_glob", cfg.LogGlob, "sink", cfg.SinkURL, "node", cfg.Node, "flush_s", cfg.FlushSeconds)
+		"log_glob", cfg.LogGlob, "sink", cfg.SinkURL, "node", cfg.Node, "flush_s", cfg.FlushSeconds,
+		"ca_file", cfg.CAFile)
 
 	a := newAgg()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -52,7 +60,7 @@ func main() {
 	})
 
 	// 定期推送
-	flushLoop(ctx, a, cfg)
+	flushLoop(ctx, a, cfg, cl)
 	slog.Info("采集器退出")
 }
 
@@ -63,6 +71,7 @@ type Config struct {
 	SinkToken    string // COLLECTOR_SINK_TOKEN:推送鉴权 Bearer(可空)
 	Node         string // COLLECTOR_NODE:本节点标识,默认 hostname
 	FlushSeconds int    // COLLECTOR_FLUSH_SECONDS:聚合推送间隔,默认 60
+	CAFile       string // COLLECTOR_CA_FILE:额外信任的 PEM 根证书路径(可空)
 }
 
 func loadConfig() Config {
@@ -80,6 +89,7 @@ func loadConfig() Config {
 		SinkToken:    env("COLLECTOR_SINK_TOKEN", ""),
 		Node:         node,
 		FlushSeconds: fs,
+		CAFile:       env("COLLECTOR_CA_FILE", ""),
 	}
 }
 
@@ -90,9 +100,33 @@ func env(k, def string) string {
 	return def
 }
 
+// newHTTPClient 创建推送客户端。CAFile 仅用于追加一个私有 CA，绝不跳过 TLS 校验。
+func newHTTPClient(cfg Config) (*http.Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if cfg.CAFile != "" {
+		pemData, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("读取 COLLECTOR_CA_FILE %q: %w", cfg.CAFile, err)
+		}
+		roots, err := x509.SystemCertPool()
+		if err != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+		if ok := roots.AppendCertsFromPEM(pemData); !ok {
+			return nil, fmt.Errorf("COLLECTOR_CA_FILE %q 不含有效 PEM 证书", cfg.CAFile)
+		}
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		} else {
+			transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+		}
+		transport.TLSClientConfig.RootCAs = roots
+	}
+	return &http.Client{Timeout: 10 * time.Second, Transport: transport}, nil
+}
+
 // flushLoop 每 FlushSeconds 取出聚合并推送;推送失败则合并回下批,不丢数据。
-func flushLoop(ctx context.Context, a *agg, cfg Config) {
-	cl := &http.Client{Timeout: 10 * time.Second}
+func flushLoop(ctx context.Context, a *agg, cfg Config, cl *http.Client) {
 	tick := time.NewTicker(time.Duration(cfg.FlushSeconds) * time.Second)
 	defer tick.Stop()
 	for {
