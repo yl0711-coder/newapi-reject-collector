@@ -55,6 +55,7 @@ new-api 本地日志 ──tail+正则──► 采集器 ──按分钟聚合�
 ```jsonc
 {
   "node": "slave",
+  "batch_id": "0f45d34c44e34e34998cf64d246e45fa",
   "samples": [
     {"bucket_ts": 1781234560, "reason": "no_available_channel",
      "model": "claude-sonnet-4-5", "group": "AZ-Claude-CH1", "count": 5}
@@ -62,7 +63,10 @@ new-api 本地日志 ──tail+正则──► 采集器 ──按分钟聚合�
 }
 ```
 - `bucket_ts`:分钟桶(unix 秒,对齐 60)。
-- 推送失败会**合并回下一批重试**,不丢数据(中心短暂不可达无碍);长期不可达时有内存上限保护。
+- `batch_id`:每个待确认批次的唯一 ID。网络失败时原样复用，中心按节点 + 批次去重，避免“中心已写入但响应丢失”导致重复计数。
+- 推送失败会保留原批次重试；期间的新事件留在下一批，不丢数据(中心短暂不可达无碍)。长期不可达时仍有内存上限保护。
+
+升级时请**先升级采集器，再升级中心 Monitor**：旧 Monitor 会忽略新增的 `batch_id`，而新版 Monitor 会要求该字段；这个顺序不会产生采集空窗。
 
 ## 部署(Docker,每个 new-api 节点一份)
 

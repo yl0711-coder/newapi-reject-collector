@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
@@ -93,6 +94,53 @@ func TestAgg(t *testing.T) {
 	a.merge(s)
 	if got := a.drain(); len(got) != 2 {
 		t.Errorf("merge 后应有 2 桶,得 %d", len(got))
+	}
+}
+
+func TestFlushRetryKeepsBatchIDAndSeparatesNewEvents(t *testing.T) {
+	type payload struct {
+		Node    string   `json:"node"`
+		BatchID string   `json:"batch_id"`
+		Samples []Sample `json:"samples"`
+	}
+	var got []payload
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body payload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		got = append(got, body)
+		if len(got) == 1 {
+			http.Error(w, "模拟响应丢失/失败", http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	a := newAgg()
+	a.add(120, "no_available_channel", "m1", "g1")
+	cfg := Config{SinkURL: server.URL, Node: "master"}
+	pending, err := flushOne(a, nil, cfg, server.Client())
+	if err == nil || pending == nil {
+		t.Fatalf("首次失败必须保留待确认批次: pending=%+v err=%v", pending, err)
+	}
+	firstID := pending.ID
+	// 首批待确认期间新事件只能留在下一批，不能并入后换一个 batch_id。
+	a.add(180, "no_available_channel", "m2", "g2")
+	pending, err = flushOne(a, pending, cfg, server.Client())
+	if err != nil || pending != nil {
+		t.Fatalf("同批重试应成功: pending=%+v err=%v", pending, err)
+	}
+	pending, err = flushOne(a, nil, cfg, server.Client())
+	if err != nil || pending != nil {
+		t.Fatalf("下一批应成功: pending=%+v err=%v", pending, err)
+	}
+	if len(got) != 3 || got[0].BatchID != firstID || got[1].BatchID != firstID {
+		t.Fatalf("失败重试没有复用同一批次: %+v", got)
+	}
+	if got[2].BatchID == firstID || len(got[0].Samples) != 1 || len(got[1].Samples) != 1 || len(got[2].Samples) != 1 {
+		t.Fatalf("新事件没有独立成下一批: %+v", got)
 	}
 }
 
