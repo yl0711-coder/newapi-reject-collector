@@ -11,8 +11,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -125,34 +127,86 @@ func newHTTPClient(cfg Config) (*http.Client, error) {
 	return &http.Client{Timeout: 10 * time.Second, Transport: transport}, nil
 }
 
-// flushLoop 每 FlushSeconds 取出聚合并推送;推送失败则合并回下批,不丢数据。
+type sampleBatch struct {
+	ID      string
+	Samples []Sample
+}
+
+func newBatchID() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func takeBatch(a *agg) (*sampleBatch, error) {
+	samples := a.drain()
+	if len(samples) == 0 {
+		return nil, nil
+	}
+	id, err := newBatchID()
+	if err != nil {
+		a.merge(samples)
+		return nil, err
+	}
+	return &sampleBatch{ID: id, Samples: samples}, nil
+}
+
+// flushOne 只在没有待确认批次时取新数据。网络失败（包括服务端已落库但响应丢失）
+// 时保留原 batch_id 原样重试，配合中心批次台账实现 exactly-once 累加。
+func flushOne(a *agg, pending *sampleBatch, cfg Config, cl *http.Client) (*sampleBatch, error) {
+	if pending == nil {
+		var err error
+		pending, err = takeBatch(a)
+		if err != nil || pending == nil {
+			return pending, err
+		}
+	}
+	if err := postSamples(cl, cfg, pending.ID, pending.Samples); err != nil {
+		return pending, err
+	}
+	slog.Info("已推送", "samples", len(pending.Samples), "batch_id", pending.ID)
+	return nil, nil
+}
+
+// flushLoop 每 FlushSeconds 取出聚合并推送；推送失败保留同一批次下次重试。
+// 新到事件继续留在 agg 中，不会和未确认批次混合后换 ID，避免响应丢失造成重复计数。
 func flushLoop(ctx context.Context, a *agg, cfg Config, cl *http.Client) {
 	tick := time.NewTicker(time.Duration(cfg.FlushSeconds) * time.Second)
 	defer tick.Stop()
+	var pending *sampleBatch
 	for {
 		select {
 		case <-ctx.Done():
-			if s := a.drain(); len(s) > 0 { // 退出前最后冲一次
-				_ = postSamples(cl, cfg, s)
+			// 退出前最多冲两批：先完成既有待确认批次，再发送停机前新积累的一批。
+			for attempts := 0; attempts < 2; attempts++ {
+				var err error
+				pending, err = flushOne(a, pending, cfg, cl)
+				if err != nil || pending != nil {
+					break
+				}
 			}
 			return
 		case <-tick.C:
-			samples := a.drain()
-			if len(samples) == 0 {
-				continue
-			}
-			if err := postSamples(cl, cfg, samples); err != nil {
-				slog.Warn("推送失败,合并回下批重试", "err", err, "samples", len(samples))
-				a.merge(samples)
-			} else {
-				slog.Info("已推送", "samples", len(samples))
+			var err error
+			pending, err = flushOne(a, pending, cfg, cl)
+			if err != nil {
+				count := 0
+				if pending != nil {
+					count = len(pending.Samples)
+				}
+				slog.Warn("推送失败,保留原批次重试", "err", err, "samples", count)
 			}
 		}
 	}
 }
 
-func postSamples(cl *http.Client, cfg Config, samples []Sample) error {
-	body, err := json.Marshal(map[string]any{"node": cfg.Node, "samples": samples})
+func postSamples(cl *http.Client, cfg Config, batchID string, samples []Sample) error {
+	if batchID == "" {
+		return fmt.Errorf("batch_id 不能为空")
+	}
+	body, err := json.Marshal(map[string]any{"node": cfg.Node, "batch_id": batchID, "samples": samples})
 	if err != nil {
 		return err
 	}
