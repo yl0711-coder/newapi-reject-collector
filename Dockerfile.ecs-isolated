@@ -1,0 +1,17 @@
+# Explicit local/approved artifact required; no implicit download/latest agent.
+ARG ECS_AGENT_IMAGE
+FROM ${ECS_AGENT_IMAGE} AS agent
+FROM golang:1.26.6-alpine3.23 AS build
+WORKDIR /src
+COPY go.mod ./
+COPY *.go ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/collector .
+
+FROM alpine:3.23 AS runtime
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates \
+    && addgroup -S collector && adduser -S -G collector collector \
+    && mkdir -p /data/ecs && chown collector:collector /data/ecs && chmod 700 /data/ecs
+COPY --from=agent /usr/local/bin/ecslogagent /usr/local/bin/ecslogagent
+COPY --from=build /out/collector /collector
+USER collector
+ENTRYPOINT ["/usr/local/bin/ecslogagent", "--", "/collector"]

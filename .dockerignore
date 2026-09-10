@@ -1,0 +1,7 @@
+# Only compile inputs enter the local/CI Docker context. Never send credentials,
+# checkpoints, logs, compiled binaries, backups or Git metadata to BuildKit.
+*
+!Dockerfile
+!go.mod
+!*.go
+*_test.go
