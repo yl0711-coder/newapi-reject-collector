@@ -1,5 +1,5 @@
 # 多阶段构建:静态编译,运行镜像极小(scratch)。
-FROM golang:1.25-alpine AS build
+FROM golang:1.26.6-alpine3.23 AS build
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./

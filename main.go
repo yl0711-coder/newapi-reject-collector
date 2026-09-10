@@ -41,6 +41,12 @@ func main() {
 		slog.Error("缺少 COLLECTOR_SINK_URL(中心监控接收地址)")
 		os.Exit(1)
 	}
+	if cfg.StatePath != "" {
+		if _, err := validateDurableConfig(cfg); err != nil {
+			slog.Error("持久采集配置无效", "err", err)
+			os.Exit(1)
+		}
+	}
 	cl, err := newHTTPClient(cfg)
 	if err != nil {
 		slog.Error("初始化 HTTPS 客户端失败", "err", err)
@@ -52,6 +58,15 @@ func main() {
 
 	a := newAgg()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	if cfg.StatePath != "" {
+		err := runDurableCollector(ctx, cfg, cl)
+		stop()
+		if err != nil {
+			slog.Error("持久采集停止，保留原状态；请处理后重启", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	defer stop()
 
 	// tail 日志 → 解析 → 累加
@@ -68,12 +83,15 @@ func main() {
 
 // Config 全部从环境变量读取。
 type Config struct {
+	ECSSocket    string // Default off; only private IPC to the isolated ECS signing agent.
 	LogGlob      string // COLLECTOR_LOG_GLOB:要 tail 的日志(支持通配),默认 new-api 默认路径
 	SinkURL      string // COLLECTOR_SINK_URL:中心监控接收地址(必填)
 	SinkToken    string // COLLECTOR_SINK_TOKEN:推送鉴权 Bearer(可空)
 	Node         string // COLLECTOR_NODE:本节点标识,默认 hostname
 	FlushSeconds int    // COLLECTOR_FLUSH_SECONDS:聚合推送间隔,默认 60
 	CAFile       string // COLLECTOR_CA_FILE:额外信任的 PEM 根证书路径(可空)
+	StatePath    string // Optional atomic cursor + frozen batch checkpoint. Empty preserves legacy Lightsail behavior.
+	LogTimezone  string // Required in durable mode; never relabel backfill with collection time.
 }
 
 func loadConfig() Config {
@@ -86,12 +104,15 @@ func loadConfig() Config {
 		fs = 60
 	}
 	return Config{
+		ECSSocket:    env("COLLECTOR_ECS_SOCKET", ""),
 		LogGlob:      env("COLLECTOR_LOG_GLOB", "/app/logs/oneapi-*.log"),
 		SinkURL:      env("COLLECTOR_SINK_URL", ""),
 		SinkToken:    env("COLLECTOR_SINK_TOKEN", ""),
 		Node:         node,
 		FlushSeconds: fs,
 		CAFile:       env("COLLECTOR_CA_FILE", ""),
+		StatePath:    env("COLLECTOR_STATE_PATH", ""),
+		LogTimezone:  env("COLLECTOR_LOG_TIMEZONE", ""),
 	}
 }
 
@@ -104,6 +125,12 @@ func env(k, def string) string {
 
 // newHTTPClient 创建推送客户端。CAFile 仅用于追加一个私有 CA，绝不跳过 TLS 校验。
 func newHTTPClient(cfg Config) (*http.Client, error) {
+	if cfg.ECSSocket != "" {
+		if _, err := validateDurableConfig(cfg); err != nil {
+			return nil, err
+		}
+		return &http.Client{Timeout: 10 * time.Second, Transport: ecsSocketTransport{cfg.ECSSocket}}, nil
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if cfg.CAFile != "" {
 		pemData, err := os.ReadFile(cfg.CAFile)
